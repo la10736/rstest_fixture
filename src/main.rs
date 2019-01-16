@@ -1,7 +1,9 @@
-struct A {}
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 use lazy_static::lazy_static;
-use std::sync::Mutex;
+
+struct A {}
 
 lazy_static! {
     static ref COUNTER: Mutex<usize> = Mutex::new(0);
@@ -13,28 +15,52 @@ fn counter_get() -> usize {
     *val
 }
 
+struct FixtureGuard {
+    counter: usize,
+    parents: Vec<FixtureGuard>,
+}
+
+impl Drop for FixtureGuard {
+    fn drop(&mut self) {
+        println!("teardown [{}]", self.counter)
+    }
+}
+
+impl FixtureGuard {
+    fn new(counter: usize) -> Self {
+        FixtureGuard { counter, parents: vec![] }
+    }
+}
+
+impl Default for FixtureGuard {
+    fn default() -> Self {
+        Self::new(counter_get())
+    }
+}
+
 struct Fixture<T> {
     inner: Option<T>,
-    counter: usize
+    guard: FixtureGuard,
 }
 
 impl<T> Fixture<T> {
+    fn new(inner: T, guard: FixtureGuard) -> Self {
+        println!("setup [{}]", guard.counter);
+        Fixture { inner: Some(inner), guard }
+    }
     pub fn take(&mut self) -> T {
         self.inner.take().unwrap()
     }
-}
 
-impl<T:Sized> From<T> for Fixture<T> {
-    fn from(inner: T) -> Self {
-        let counter = counter_get();
-        println!("setup [{}]", counter);
-        Fixture { inner: Some(inner), counter }
+    fn push<S>(mut self, parent: Fixture<S>) -> Self {
+        self.guard.parents.push(parent.guard);
+        self
     }
 }
 
-impl<T> Drop for Fixture<T> {
-    fn drop(&mut self) {
-        println!("teardown [{}]", self.counter)
+impl<T: Sized> From<T> for Fixture<T> {
+    fn from(inner: T) -> Self {
+        Fixture::new(inner, Default::default())
     }
 }
 
@@ -46,12 +72,31 @@ fn copy_val() -> Fixture<usize> {
     copy().into()
 }
 
-fn reference() -> &'static str {
-    "ciao"
+lazy_static! {
+    static ref HASH: HashMap<i32, &'static str> = {
+        let mut h = HashMap::new();
+        h.insert(3, "ciao");
+        h
+    };
+}
+
+fn key() -> i32 {
+    3
+}
+
+fn key_val() -> Fixture<i32> {
+    key().into()
+}
+
+fn reference(key: i32) -> &'static str {
+    HASH.get(&key).unwrap_or(&"__NOTHING__")
 }
 
 fn reference_val() -> Fixture<&'static str> {
-    reference().into()
+    let mut key_fixture = key_val();
+    let key = key_fixture.take();
+
+    Fixture::from(reference(key)).push(key_fixture)
 }
 
 fn moved() -> A {
@@ -64,8 +109,6 @@ fn moved_val() -> Fixture<A> {
 
 #[test]
 fn prova() {
-
-
     fn prova(copy: usize, reference: &str, _moved: A) {
         assert_eq!(copy, reference.len());
         println!("Prova done");
