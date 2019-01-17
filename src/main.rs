@@ -1,64 +1,53 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 use lazy_static::lazy_static;
 
-struct A {}
-
-lazy_static! {
-    static ref COUNTER: Mutex<usize> = Mutex::new(0);
+trait TearDown {
+    fn tear_down(&self);
 }
 
-fn counter_get() -> usize {
-    let mut val = COUNTER.lock().unwrap();
-    *val += 1;
-    *val
-}
-
-struct FixtureGuard {
-    counter: usize,
-    parents: Vec<FixtureGuard>,
-}
-
-impl Drop for FixtureGuard {
-    fn drop(&mut self) {
-        println!("teardown [{}]", self.counter)
+#[derive(Default)]
+struct EmptyGuard {}
+impl TearDown for EmptyGuard {
+    fn tear_down(&self) {
+        println!("Empty Tear Down")
     }
 }
 
-impl FixtureGuard {
-    fn new(counter: usize) -> Self {
-        FixtureGuard { counter, parents: vec![] }
+impl<A: TearDown, B: TearDown> TearDown for (A, B) {
+    fn tear_down(&self) {
+        self.0.tear_down();
+        self.1.tear_down();
     }
 }
 
-impl Default for FixtureGuard {
-    fn default() -> Self {
-        Self::new(counter_get())
-    }
-}
-
-struct Fixture<T> {
+struct Fixture<T, G: TearDown> {
     inner: Option<T>,
-    guard: FixtureGuard,
+    guard: Option<G>,
 }
 
-impl<T> Fixture<T> {
-    fn new(inner: T, guard: FixtureGuard) -> Self {
-        println!("setup [{}]", guard.counter);
-        Fixture { inner: Some(inner), guard }
+impl<T, G: TearDown> Fixture<T, G> {
+    fn new(inner: T, guard: G) -> Self {
+        Fixture { inner: Some(inner), guard: Some(guard) }
     }
     pub fn take(&mut self) -> T {
         self.inner.take().unwrap()
     }
-
-    fn push<S>(mut self, parent: Fixture<S>) -> Self {
-        self.guard.parents.push(parent.guard);
-        self
+    pub fn guard(&mut self) -> G {
+        self.guard.take().unwrap()
+    }
+    pub fn compose<OTHER: TearDown>(mut self, guard: OTHER) -> Fixture<T, (G, OTHER)> {
+        Fixture::new(self.take(), (self.guard(), guard))
     }
 }
 
-impl<T: Sized> From<T> for Fixture<T> {
+impl<T, G: TearDown> Drop for Fixture<T, G> {
+    fn drop(&mut self) {
+        self.guard.take().map(|g| g.tear_down());
+    }
+}
+
+impl<T> From<T> for Fixture<T, EmptyGuard> {
     fn from(inner: T) -> Self {
         Fixture::new(inner, Default::default())
     }
@@ -68,8 +57,16 @@ fn copy() -> usize {
     4
 }
 
-fn copy_val() -> Fixture<usize> {
-    copy().into()
+fn copy_val() -> Fixture<usize, impl TearDown> {
+    println!("setup copy");
+    struct G {}
+    impl TearDown for G {
+        fn tear_down(&self) {
+            println!("teardown copy");
+        }
+    }
+
+    Fixture::new(copy(), G {})
 }
 
 lazy_static! {
@@ -84,27 +81,53 @@ fn key() -> i32 {
     3
 }
 
-fn key_val() -> Fixture<i32> {
-    key().into()
+fn key_val() -> Fixture<i32, impl TearDown> {
+    println!("setup key");
+    struct G {}
+    impl TearDown for G {
+        fn tear_down(&self) {
+            println!("teardown key");
+        }
+    }
+
+    Fixture::new(key(), G {})
 }
 
 fn reference(key: i32) -> &'static str {
     HASH.get(&key).unwrap_or(&"__NOTHING__")
 }
 
-fn reference_val() -> Fixture<&'static str> {
+fn reference_val() -> Fixture<&'static str, impl TearDown> {
     let mut key_fixture = key_val();
     let key = key_fixture.take();
 
-    Fixture::from(reference(key)).push(key_fixture)
+    println!("setup reference");
+    struct G {}
+    impl TearDown for G {
+        fn tear_down(&self) {
+            println!("teardown reference");
+        }
+    }
+
+    Fixture::new(reference(key), G {})
+        .compose(key_fixture.guard())
 }
+
+struct A {}
 
 fn moved() -> A {
     A {}
 }
 
-fn moved_val() -> Fixture<A> {
-    moved().into()
+fn moved_val() -> Fixture<A, impl TearDown> {
+    println!("setup moved");
+    struct G {}
+    impl TearDown for G {
+        fn tear_down(&self) {
+            println!("teardown moved");
+        }
+    }
+    Fixture::new(moved(), G {})
 }
 
 #[test]
@@ -114,7 +137,8 @@ fn prova() {
         println!("Prova done");
     }
 
-    let mut copy_fixture = copy_val();
+    // Example no fixture
+    let mut copy_fixture: Fixture<usize, _> = copy().into();
     let copy = copy_fixture.take();
     let mut reference_fixture = reference_val();
     let reference = reference_fixture.take();
